@@ -1,21 +1,18 @@
 # ============================================================
-# LDCT Prediction System — Python Dependencies
+# LDCT Prediction System — Python Dependencies (Linux / Bash)
 # ============================================================
-# Install with: pip install -r requirements.txt
-# NOTE: on macOS with Apple Silicon use tensorflow-macos + tensorflow-metal
-# On Linux/Windows use: tensorflow==2.13.0
+# Install with:
+#   python3 -m venv venv
+#   source venv/bin/activate
+#   pip install -r requirements.txt
 
 # --- WEB FRAMEWORK ---
 Flask==3.0.0
 gunicorn==21.2.0
 werkzeug>=3.0.0
 
-# --- TENSORFLOW (macOS Apple Silicon) ---
-# Uncomment these two for macOS:
-tensorflow-macos==2.13.0
-tensorflow-metal==1.2.0
-# For Linux/Windows, comment above and uncomment:
-# tensorflow==2.13.0
+# --- TENSORFLOW ---
+tensorflow==2.13.0
 
 # --- KERAS (must match model save format — h5 saved with Keras 3.x) ---
 keras==3.12.1
