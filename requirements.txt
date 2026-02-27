@@ -1,14 +1,31 @@
+# ============================================================
+# LDCT Prediction System — Python Dependencies
+# ============================================================
+# Install with: pip install -r requirements.txt
+# NOTE: on macOS with Apple Silicon use tensorflow-macos + tensorflow-metal
+# On Linux/Windows use: tensorflow==2.13.0
+
 # --- WEB FRAMEWORK ---
 Flask==3.0.0
 gunicorn==21.2.0
 werkzeug>=3.0.0
 
+# --- TENSORFLOW (macOS Apple Silicon) ---
+# Uncomment these two for macOS:
+tensorflow-macos==2.13.0
+tensorflow-metal==1.2.0
+# For Linux/Windows, comment above and uncomment:
+# tensorflow==2.13.0
+
+# --- KERAS (must match model save format — h5 saved with Keras 3.x) ---
+keras==3.12.1
+
 # --- DATA SCIENCE & ML CORE ---
-numpy==1.24.3
+# numpy 1.26.x required: pkl files use numpy._core (not in 1.24.x)
+numpy==1.26.4
 scipy==1.14.1
 joblib==1.4.2
 scikit-learn==1.6.1
-tensorflow==2.13.0
 lightgbm==4.6.0
 umap-learn==0.5.9.post2
 
@@ -20,5 +37,5 @@ opencv-python-headless==4.10.0.84
 
 # --- UTILITIES & API ---
 python-dotenv==1.2.1
-openai>=1.0.0
+openai==2.24.0
 httpx==0.27.2
