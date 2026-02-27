@@ -11,14 +11,13 @@ Flask==3.0.0
 gunicorn==21.2.0
 werkzeug>=3.0.0
 
-# --- TENSORFLOW ---
-tensorflow==2.13.0
-
-# --- KERAS (must match model save format — h5 saved with Keras 3.x) ---
+# --- TENSORFLOW + KERAS ---
+# TF 2.16+ officially requires Keras 3.x — no version conflict
+tensorflow==2.16.0
 keras==3.12.1
 
 # --- DATA SCIENCE & ML CORE ---
-# numpy 1.26.x required: pkl files use numpy._core (not in 1.24.x)
+# numpy 1.26.x required: pkl files use numpy._core (not available in 1.24.x)
 numpy==1.26.4
 scipy==1.14.1
 joblib==1.4.2
