@@ -13,7 +13,7 @@ werkzeug>=3.0.0
 
 # --- TENSORFLOW + KERAS ---
 # TF 2.16+ officially requires Keras 3.x — no version conflict
-tensorflow==2.16.0
+tensorflow==2.16.1
 keras==3.12.1
 
 # --- DATA SCIENCE & ML CORE ---
