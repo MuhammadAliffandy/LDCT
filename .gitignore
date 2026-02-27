@@ -1,0 +1,48 @@
+# ============================================================
+# LDCT Prediction System — .gitignore
+# ============================================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# --- Virtual Environment ---
+venv/
+env/
+.venv/
+.env/
+
+# --- Environment Variables (secrets) ---
+.env
+
+# --- ML Model Files (large binary files) ---
+ldct_model/
+
+# --- Upload Temp Directory ---
+temp_uploads/
+
+# --- Jupyter Notebooks Checkpoints ---
+.ipynb_checkpoints/
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Logs ---
+*.log
+logs/
