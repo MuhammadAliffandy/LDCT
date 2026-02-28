@@ -25,6 +25,7 @@ env/
 
 # --- ML Model Files (large binary files) ---
 ldct_model/
+ldct_model_new/
 
 # --- Upload Temp Directory ---
 temp_uploads/

@@ -24,8 +24,4 @@ class Config:
     OPENAI_MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4o-mini")
 
     # Model Paths — absolute, always correct
-    MODEL_DIR = os.path.join(_PROJECT_ROOT, "ldct_model")
-    KERAS_MODEL_PATH = os.path.join(MODEL_DIR, "best_model.h5")
-    SCALER_PATH = os.path.join(MODEL_DIR, "scaler_final.pkl")
-    UMAP_PATH = os.path.join(MODEL_DIR, "umap_final.pkl")
-    AGENT_PATH = os.path.join(MODEL_DIR, "agent_deep_verified.txt")
+    KERAS_MODEL_PATH = os.path.join(_PROJECT_ROOT, "ldct_model_new", "mod_seg_se2_model.h5")
