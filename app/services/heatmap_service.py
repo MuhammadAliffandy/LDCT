@@ -18,53 +18,98 @@ def generate_gradcam(
     target_class_idx: int = None,
 ) -> np.ndarray:
     """
-    Gradient-based class activation map for the single-input multi-task Keras model.
+    Bottleneck-layer GradCAM for the single-input multi-task Keras model.
 
-    Uses image-space gradients via tf.Variable — compatible with Keras 3.x
-    where mid-computation tensor watching is not supported.
+    Matches the make_gradcam_heatmap() implementation in LDCT-improved-se2.ipynb:
+      - Finds the last Conv2D layer at IMG_SIZE // 8 spatial resolution (bottleneck)
+      - Computes gradients of class score w.r.t. feature map activations
+      - Pools gradients → weights channels → produces localized attention map
+
+    This gives much sharper and more spatially meaningful maps than the
+    previous image-gradient (vanilla saliency) approach.
 
     Args:
-        model: Full Keras model (mod_seg_se2_model.h5)
-        input_img: float32 array (1, 256, 256, 3)
+        model: Full Keras model (best_mod_seg_se2_v2.keras)
+        input_img: float32 array (1, 256, 256, 3) already in [0, 1]
         target_class_idx: Class index. If None, uses predicted class.
 
     Returns:
         heatmap: float32 array (H, W) normalized [0, 1]
     """
     import tensorflow as tf
+    import tensorflow as _tf_mod; keras = _tf_mod.keras
 
-    img_var = tf.Variable(
-        np.array(input_img).astype(np.float32), trainable=True
-    )
+    # ── Find bottleneck Conv2D layer (deepest, smallest spatial size) ──────────
+    target_layer = None
+    for layer in model.layers:
+        if not isinstance(layer, keras.layers.Conv2D):
+            continue
+        try:
+            shape = layer.output.shape   # symbolic TensorShape — always works
+            h = shape[1]
+            if h is not None and int(h) == 256 // 8:  # 32px for 256-input, 3 MaxPools
+                target_layer = layer.name
+        except Exception:
+            pass
+
+    # Fallback: last Conv2D with most filters (= bottleneck = 256 filters)
+    if target_layer is None:
+        max_f = 0
+        for layer in model.layers:
+            if isinstance(layer, keras.layers.Conv2D):
+                if layer.filters >= max_f:
+                    max_f = layer.filters
+                    target_layer = layer.name
+
+    if target_layer is None:
+        logger.warning("GradCAM: no Conv2D found — falling back to saliency.")
+        return generate_saliency_map(model, input_img, target_class_idx)
+
+    # ── Build sub-model: conv outputs + class head ────────────────────────────
+    try:
+        grad_model = keras.Model(
+            inputs=model.inputs,
+            outputs=[
+                model.get_layer(target_layer).output,
+                model.get_layer("class_output").output
+            ]
+        )
+    except Exception as e:
+        logger.warning(f"GradCAM sub-model failed ({e}) — falling back to saliency.")
+        return generate_saliency_map(model, input_img, target_class_idx)
+
+    img_tensor = tf.cast(input_img, tf.float32)
 
     with tf.GradientTape() as tape:
-        # Puts the image tensor through the model. 
-        # For the multi-task model, outputs are [class_preds, seg_preds]
-        preds = model(img_var)
-        class_preds = preds[0]
+        tape.watch(img_tensor)
+        conv_outputs, predictions = grad_model(img_tensor, training=False)
 
         if target_class_idx is None:
-            target_class_idx = int(tf.argmax(class_preds[0]).numpy())
+            target_class_idx = int(tf.argmax(predictions[0]).numpy())
 
-        # Grab the scalar loss value for the given class
-        loss = class_preds[:, target_class_idx]
+        class_score = predictions[:, target_class_idx]
 
-    # Compute gradient of class score with respect to input image
-    grads = tape.gradient(loss, img_var)
+    # Gradients of class score w.r.t. conv feature map
+    grads = tape.gradient(class_score, conv_outputs)  # (1, h, w, C)
 
     if grads is None:
-        logger.warning("GradCAM: gradient is None — returning uniform heatmap.")
-        return np.ones((256, 256), dtype=np.float32) * 0.5
+        logger.warning("GradCAM: gradient is None — falling back to saliency.")
+        return generate_saliency_map(model, input_img, target_class_idx)
 
-    # Collapse channels: take mean of absolute gradients
-    grads_np = grads.numpy()[0]                           # (H, W, 3)
-    heatmap = np.mean(np.abs(grads_np), axis=-1)          # (H, W)
+    # Global Average Pool gradients → per-channel importance weights
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))  # (C,)
 
-    # ReLU + normalize to [0, 1]
+    # Weight channels by importance and collapse to 2D
+    conv_out = conv_outputs[0]                                # (h, w, C)
+    heatmap = conv_out @ pooled_grads[..., tf.newaxis]        # (h, w, 1)
+    heatmap = tf.squeeze(heatmap).numpy()                     # (h, w)
+
+    # ReLU + normalize
     heatmap = np.maximum(heatmap, 0)
     if heatmap.max() > 0:
         heatmap = heatmap / heatmap.max()
 
+    logger.info(f"GradCAM: layer='{target_layer}', class={target_class_idx}")
     return heatmap.astype(np.float32)
 
 
@@ -85,6 +130,7 @@ def generate_saliency_map(
         saliency: float32 array (H, W) normalized [0, 1]
     """
     import tensorflow as tf
+    import tensorflow as _tf_mod; keras = _tf_mod.keras
 
     img_var = tf.Variable(tf.cast(np.array(input_img), tf.float32))
 
@@ -180,12 +226,11 @@ def generate_heatmap_from_image(image_path: str, mode: str = "gradcam") -> dict:
         if raw_img is None:
             return {"error": "Cannot read image"}
 
+        # ---- Prepare input — notebook-compatible (HU-windowed, float [0, 1]) ----
         img_rgb = cv2.cvtColor(raw_img, cv2.COLOR_BGR2RGB)
-        processed_img = smart_preprocess(img_rgb)
-
-        # Prepare inputs for Keras model
-        input_float = processed_img.astype(np.float32) / 255.0
-        input_batch = np.expand_dims(input_float, axis=0)
+        # smart_preprocess returns float32 [0,1]  — same as process_dicom() in notebook
+        preprocessed = smart_preprocess(img_rgb)           # (256, 256, 3) float32 [0,1]
+        input_batch  = np.expand_dims(preprocessed, axis=0)  # (1, 256, 256, 3)
 
         # Get predicted outputs to extract class and segmentation mask
         keras_outputs = models["keras"].predict(input_batch, verbose=0)
@@ -194,46 +239,60 @@ def generate_heatmap_from_image(image_path: str, mode: str = "gradcam") -> dict:
 
         target_class = int(np.argmax(class_preds))
 
-        # Generate Attention Map (GradCAM or Saliency)
+        # ---- Attention Map (GradCAM or Saliency) --------------------------------
         if mode == "saliency":
             heatmap = generate_saliency_map(models["keras"], input_batch, target_class)
         else:
             heatmap = generate_gradcam(models["keras"], input_batch, target_class)
 
-        # Overlay Attention Map
-        overlaid_attention = overlay_heatmap(processed_img, heatmap)
+        # Overlay Attention Map on the preprocessed image (uint8 for display)
+        display_img = (preprocessed * 255).astype(np.uint8)  # [0,255] RGB
+        overlaid_attention = overlay_heatmap(display_img, heatmap)
         _, buf_attention = cv2.imencode(".png", cv2.cvtColor(overlaid_attention, cv2.COLOR_RGB2BGR))
         heatmap_b64 = base64.b64encode(buf_attention).decode("utf-8")
 
-        # Raw Attention Map
+        # Raw Attention Colormap
         heatmap_colored = cv2.applyColorMap(
             np.uint8(255 * cv2.resize(heatmap, (256, 256))), cv2.COLORMAP_JET
         )
         _, buf_raw = cv2.imencode(".png", heatmap_colored)
         raw_heatmap_b64 = base64.b64encode(buf_raw).decode("utf-8")
 
-        # --- Disease Location Overlay (from segmentation mask) ---
+        # ---- Segmentation Mask Overlays -----------------------------------------
         location_b64 = None
+        seg_mask_b64 = None
         try:
-            seg_mask_2d = seg_mask_batch[0, :, :, 0]
-            if seg_mask_2d.max() > 0:
-                seg_mask_2d = seg_mask_2d / seg_mask_2d.max()
+            seg_mask_2d = seg_mask_batch[0, :, :, 0]   # (256, 256) float32 sigmoid
 
-            # Overlay using a hot colormap to differentiate from conventional GradCAM
+            # Normalize for display
+            seg_display = seg_mask_2d
+            if seg_display.max() > 0:
+                seg_display = seg_display / seg_display.max()
+
+            # ── Location overlay (hot colormap) — kept for backwards compat. ──
             loc_overlaid = overlay_heatmap(
-                processed_img, seg_mask_2d, colormap=cv2.COLORMAP_HOT, alpha=0.5
+                display_img, seg_display, colormap=cv2.COLORMAP_HOT, alpha=0.5
             )
             _, loc_buf = cv2.imencode(".png", cv2.cvtColor(loc_overlaid, cv2.COLOR_RGB2BGR))
             location_b64 = base64.b64encode(loc_buf).decode("utf-8")
+
+            # ── Raw segmentation sigmoid as hot PNG (new field) ───────────────
+            seg_colored = cv2.applyColorMap(
+                np.uint8(255 * cv2.resize(seg_display, (256, 256))), cv2.COLORMAP_HOT
+            )
+            _, seg_buf = cv2.imencode(".png", seg_colored)
+            seg_mask_b64 = base64.b64encode(seg_buf).decode("utf-8")
+
         except Exception as loc_e:
-            logger.error(f"Disease Locator inference error: {loc_e}", exc_info=True)
+            logger.error(f"Segmentation overlay error: {loc_e}", exc_info=True)
 
         logger.info(f"Heatmap generated: mode={mode}, target_class={target_class}")
 
         return {
             "heatmap_overlay_b64": heatmap_b64,
-            "heatmap_raw_b64": raw_heatmap_b64,
+            "heatmap_raw_b64":     raw_heatmap_b64,
             "location_overlay_b64": location_b64,
+            "seg_mask_b64":         seg_mask_b64,   # raw seg sigmoid — new field
             "mode": mode,
             "target_class": target_class,
         }

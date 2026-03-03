@@ -26,21 +26,66 @@ FEATURE_NAMES = [
 ]
 
 
+def apply_hu_window_png(gray: np.ndarray) -> np.ndarray:
+    """
+    Approximate HU windowing for already-rendered CT PNG images.
+
+    Because uploaded PNGs don't carry raw HU values, we use percentile-based
+    soft clipping (p1–p99) to replicate the dynamic range compression that
+    HU windowing applies during DICOM training.
+
+    This matches the effect of apply_hu_window() in LDCT-improved-se2.ipynb.
+
+    Args:
+        gray: Grayscale image (H, W) as float32 or uint8
+
+    Returns:
+        Normalized float32 image in [0, 1]
+    """
+    img = gray.astype(np.float32)
+    p_low  = np.percentile(img, 1)
+    p_high = np.percentile(img, 99)
+    if p_high - p_low < 1e-6:
+        return np.zeros_like(img, dtype=np.float32)
+    img = np.clip(img, p_low, p_high)
+    img = (img - p_low) / (p_high - p_low)    # → [0, 1]
+    return img.astype(np.float32)
+
+
 def smart_preprocess(img: np.ndarray) -> np.ndarray:
     """
-    Crop and resize CT image to 256x256.
-    If the image is large (full-windowed CT viewer screenshot), crop to body area.
+    Preprocess a CT image to match the LDCT-improved-se2.ipynb training pipeline.
+
+    Mirrors process_dicom() from the notebook:
+      1. Convert to grayscale
+      2. Apply percentile windowing (approximates HU lung window on rendered PNGs)
+      3. Resize to 256×256
+      4. Stack to 3-channel RGB float32 in [0, 1]
+
+    Args:
+        img: RGB or grayscale image array (any size, uint8 or float32)
+
+    Returns:
+        (256, 256, 3) float32 in [0, 1]  — ready for model.predict()
     """
     if img is None:
         return None
-    h, w = img.shape[:2]
-    if h > 450 and w > 550:
-        crop = img[30:430, 200:550]
-        if crop.size == 0:
-            crop = img
+
+    # Convert to grayscale
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     else:
-        crop = img
-    return cv2.resize(crop, IMG_SIZE)
+        gray = img.copy()
+
+    # HU-style windowing
+    windowed = apply_hu_window_png(gray)
+
+    # Resize to 256×256
+    resized = cv2.resize(windowed, IMG_SIZE, interpolation=cv2.INTER_LINEAR)
+
+    # Stack to 3-channel float RGB (matches np.stack([img]*3, axis=-1) in notebook)
+    return np.stack([resized] * 3, axis=-1).astype(np.float32)  # (256, 256, 3) in [0,1]
+
 
 
 def _wavelet_band_stats(band: np.ndarray) -> list:
