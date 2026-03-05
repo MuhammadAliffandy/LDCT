@@ -24,8 +24,8 @@ class Config:
     OPENAI_MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4o-mini")
 
     # Model Paths — absolute, always correct
-    # New improved model: Mod-Seg-SE(2) v2 trained with HU windowing + deeper encoder
-    KERAS_MODEL_PATH = os.path.join(_PROJECT_ROOT, "ldct_improved_se2", "best_mod_seg_se2_v2.keras")
+    # Improved Mod-Seg-SE(2) v2 trained on new NIfTI data from Google Drive
+    KERAS_MODEL_PATH = os.path.join(_PROJECT_ROOT, "ldct_improved_new_data", "best_mod_seg_se2_v2.keras")
 
     # CT Preprocessing — HU Window (Lung Window)
     # Matches the training pipeline in LDCT-improved-se2.ipynb exactly.

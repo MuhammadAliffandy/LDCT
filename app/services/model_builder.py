@@ -253,3 +253,209 @@ def load_model_from_weights(weights_h5_path: str):
         f"{model.count_params():,} parameters"
     )
     return model
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ORIGINAL Mod-Seg-SE BASE architecture  (matches LDCT-mod-se-base.ipynb)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Key differences from v2:
+#   - 2 encoder levels (32 → 64) + 128 bottleneck  (v2 has 3 levels + 256 bn)
+#   - NO BatchNormalization in conv blocks
+#   - Conv2D uses activation='relu' and default use_bias=True
+#   - Simpler classification head: Dense(64) → Dropout(0.5)
+#   - 2 decoder levels (v2 has 3)
+#   - 5 SE blocks total (v2 has 7)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _se_block_base(x, ratio=8):
+    """SE block for the base architecture — same logic, but kept separate for clarity."""
+    import tensorflow as tf
+    keras = tf.keras
+    filters = x.shape[-1]
+    se = keras.layers.GlobalAveragePooling2D()(x)
+    se = keras.layers.Reshape((1, 1, filters))(se)
+    se = keras.layers.Dense(filters // ratio, activation="relu",
+                            kernel_initializer="he_normal", use_bias=False)(se)
+    se = keras.layers.Dense(filters, activation="sigmoid",
+                            kernel_initializer="he_normal", use_bias=False)(se)
+    return keras.layers.Multiply()([x, se])
+
+
+def build_mod_seg_se2_base(input_shape=(256, 256, 3), num_classes=NUM_CLASSES):
+    """
+    Original Mod-Seg-SE(2) architecture — 2-level U-Net + SE blocks + dual head.
+    Exact replica of build_mod_seg_se2() in LDCT-mod-se-base.ipynb.
+    """
+    import tensorflow as tf
+    keras = tf.keras
+
+    inputs = keras.layers.Input(shape=input_shape, name="image_input")
+
+    # ── ENCODER ────────────────────────────────────────────────────────────────
+    c1 = keras.layers.Conv2D(32, (3, 3), activation="relu", padding="same")(inputs)
+    c1 = keras.layers.Conv2D(32, (3, 3), activation="relu", padding="same")(c1)
+    c1 = _se_block_base(c1)
+    p1 = keras.layers.MaxPooling2D((2, 2))(c1)
+
+    c2 = keras.layers.Conv2D(64, (3, 3), activation="relu", padding="same")(p1)
+    c2 = keras.layers.Conv2D(64, (3, 3), activation="relu", padding="same")(c2)
+    c2 = _se_block_base(c2)
+    p2 = keras.layers.MaxPooling2D((2, 2))(c2)
+
+    # ── BOTTLENECK ─────────────────────────────────────────────────────────────
+    bn = keras.layers.Conv2D(128, (3, 3), activation="relu", padding="same")(p2)
+    bn = keras.layers.Conv2D(128, (3, 3), activation="relu", padding="same")(bn)
+    bn = _se_block_base(bn)
+
+    # ── CLASSIFICATION HEAD ────────────────────────────────────────────────────
+    cls = keras.layers.GlobalAveragePooling2D(name="gap_classification")(bn)
+    cls = keras.layers.Dense(64, activation="relu")(cls)
+    cls = keras.layers.Dropout(0.5)(cls)
+    class_output = keras.layers.Dense(
+        num_classes, activation="softmax", name="class_output"
+    )(cls)
+
+    # ── SEGMENTATION DECODER ───────────────────────────────────────────────────
+    u1 = keras.layers.UpSampling2D((2, 2))(bn)
+    d1 = keras.layers.Concatenate()([u1, c2])
+    d1 = keras.layers.Conv2D(64, (3, 3), activation="relu", padding="same")(d1)
+    d1 = keras.layers.Conv2D(64, (3, 3), activation="relu", padding="same")(d1)
+    d1 = _se_block_base(d1)
+
+    u2 = keras.layers.UpSampling2D((2, 2))(d1)
+    d2 = keras.layers.Concatenate()([u2, c1])
+    d2 = keras.layers.Conv2D(32, (3, 3), activation="relu", padding="same")(d2)
+    d2 = keras.layers.Conv2D(32, (3, 3), activation="relu", padding="same")(d2)
+    d2 = _se_block_base(d2)
+
+    seg_output = keras.layers.Conv2D(
+        1, (1, 1), activation="sigmoid", name="seg_output"
+    )(d2)
+
+    model = keras.Model(inputs=inputs, outputs=[class_output, seg_output])
+    return model
+
+
+# ─── Legacy Keras 2 HDF5 weight loader ────────────────────────────────────────
+
+def load_legacy_h5_weights(model, h5_path: str) -> None:
+    """
+    Load weights from a Legacy Keras 2 HDF5 file (model.save() format).
+
+    Structure: f['model_weights'][layer_name][layer_name][weight_name] → ndarray
+
+    Weight matching: h5 values are matched to model weights by shape, not by
+    alphabetical order. This handles the bias/kernel ordering difference between
+    how h5 stores them (alphabetical: bias, kernel) and how model.weights
+    orders them (kernel, bias).
+    """
+    import h5py
+
+    with h5py.File(h5_path, "r") as f:
+        mw = f["model_weights"]
+        available_names = set(mw.keys())
+
+        assigned = 0
+        skipped = 0
+
+        for layer in model.layers:
+            if not layer.weights:
+                continue
+
+            lname = layer.name
+
+            if lname not in available_names:
+                logger.warning(
+                    f"Layer '{lname}' not in h5 — keeping random init."
+                )
+                skipped += len(layer.weights)
+                continue
+
+            lg = mw[lname]
+            # Legacy format: mw[layer_name][layer_name][kernel/bias]
+            if lname not in lg:
+                logger.warning(
+                    f"Layer '{lname}' has no sub-group — skipping."
+                )
+                skipped += len(layer.weights)
+                continue
+
+            weight_group = lg[lname]
+            h5_dict = {
+                wn: np.array(weight_group[wn])
+                for wn in weight_group.keys()
+            }
+
+            if len(h5_dict) != len(layer.weights):
+                logger.warning(
+                    f"'{lname}': expected {len(layer.weights)} weights, "
+                    f"h5 has {len(h5_dict)} — skipping."
+                )
+                skipped += len(layer.weights)
+                continue
+
+            # Match h5 values to model weights by shape (not alphabetical order)
+            model_shapes = [tuple(w.shape) for w in layer.weights]
+            h5_vals_ordered = []
+            used_keys = set()
+            mismatch = False
+
+            for w_shape in model_shapes:
+                matched = False
+                for wn, val in h5_dict.items():
+                    if wn not in used_keys and val.shape == w_shape:
+                        h5_vals_ordered.append(val)
+                        used_keys.add(wn)
+                        matched = True
+                        break
+                if not matched:
+                    logger.warning(
+                        f"'{lname}': no h5 weight with shape {w_shape} — skipping layer."
+                    )
+                    mismatch = True
+                    break
+
+            if mismatch:
+                skipped += len(layer.weights)
+                continue
+
+            layer.set_weights(h5_vals_ordered)
+            assigned += len(layer.weights)
+
+    logger.info(
+        f"Legacy H5 weight loading: {assigned} weights assigned, "
+        f"{skipped} skipped."
+    )
+
+
+def load_model_from_h5(h5_path: str):
+    """
+    Build the original Mod-Seg-SE(2) base model and load Legacy Keras 2 weights.
+
+    Args:
+        h5_path: Absolute path to mod_seg_se2_model.h5
+
+    Returns:
+        tf.keras.Model ready for inference.
+
+    Raises:
+        FileNotFoundError if the weights file does not exist.
+    """
+    if not os.path.exists(h5_path):
+        raise FileNotFoundError(f"Weights file not found: {h5_path}")
+
+    logger.info("Building Mod-Seg-SE(2) BASE architecture (tf.keras)...")
+    model = build_mod_seg_se2_base(
+        input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
+        num_classes=NUM_CLASSES,
+    )
+
+    logger.info(f"Loading Legacy Keras 2 weights from: {h5_path}")
+    load_legacy_h5_weights(model, h5_path)
+
+    logger.info(
+        f"✅ Model ready — {len(model.layers)} layers, "
+        f"{model.count_params():,} parameters"
+    )
+    return model
